@@ -79,9 +79,9 @@ class Stable_Hybrid_Model(nn.Module):
         使用 Teacher Forcing，返回 logits。
         """
         encoder_outputs = self.extract_features(x)
-        decoder_out = self.decoder.forward_train(encoder_outputs, self.max_len, y)
+        decoder_out, weight_matrix = self.decoder.forward_train(encoder_outputs, self.max_len, y)
         logits = self.prediction(decoder_out)
-        return logits, decoder_out
+        return logits, encoder_outputs, weight_matrix
 
     def forward_unsupervised(self, x):
         """
@@ -96,23 +96,30 @@ class Stable_Hybrid_Model(nn.Module):
         last_hidden = Variable(torch.zeros(self.decoder.num_rnn_layers, batch_size, self.decoder.hidden_size)).cuda() if USE_CUDA else Variable(torch.zeros(self.decoder.num_rnn_layers, batch_size, self.decoder.hidden_size))
 
         features = []
+        weights = []
         for i in range(self.max_len - 1):
-            feature, last_hidden = self.decoder.forward_step(input_char, last_hidden, encoder_outputs)
+            feature, last_hidden, weight_matrix = self.decoder.forward_step(input_char, last_hidden, encoder_outputs)
             output = self.prediction(feature)
             input_char = output.max(1)[1]
             features.append(feature.unsqueeze(1))
             outputs.append(output.unsqueeze(1))
+            weights.append(weight_matrix)
         
-        return torch.cat(outputs, dim=1), torch.cat(features, dim=1)
+        return torch.cat(outputs, dim=1), encoder_outputs, torch.cat(weights, dim=1)
 
     def forward_domain(self, features, lambda_):
-        """  
+        """
         路径3: 领域判别路径 (用于计算 L_Domain)
         接收提取好的特征，返回领域预测。
         """
-        # 将序列特征平均池化
+        features, weight_matrix = features
+        weighted_feats = torch.einsum('bsf,bfd->bsd', weight_matrix, features)
+        attn_features = weighted_feats.view(-1, weighted_feats.shape[-1])
+
+        # 加上平均池化特征
         pooled_features = torch.mean(features, dim=1)
-        # pooled_features = features.view(-1, features.shape[-1])
+        pooled_features = torch.cat([pooled_features, attn_features], dim=0)
+
         # 应用 GRL
         reversed_features = self.grl_func(pooled_features, lambda_)
         domain_predictions = self.domain_discriminator(reversed_features)

@@ -1,5 +1,4 @@
 import argparse
-import datetime
 import torch
 from torch import optim
 from torch.nn import CrossEntropyLoss
@@ -118,14 +117,14 @@ for epoch in range(args.epoch):
         else:
         # --- 正常训练阶段 ---
             # 1. 监督损失
-            logits_l, source_features = model.forward_supervised(inputs_x, targets_x)
+            logits_l, source_features, source_weight_matrix = model.forward_supervised(inputs_x, targets_x)
             Lx = class_criterion(logits_l, targets_x)
 
             # 2. 一致性损失 (只保留 Lu)
             with torch.no_grad():
-                logits_u_w_teacher, _ = model_ema.forward_unsupervised(inputs_u_w)
-            logits_u_s, _ = model.forward_unsupervised(inputs_u_s)
-            _, target_features = model.forward_unsupervised(inputs_u_w)
+                logits_u_w_teacher, _, _ = model_ema.forward_unsupervised(inputs_u_w)
+            logits_u_s, _, _ = model.forward_unsupervised(inputs_u_s)
+            _, target_features, target_weight_matrix = model.forward_unsupervised(inputs_u_w)
             
             # consistency_weight = get_current_consistency_weight(args.weight, args.consistency_rampup, epoch - args.warmup_epochs)
             # Lu = consistency_weight * consistent_criterion(logits_u_w_teacher.detach(), logits_u_s)
@@ -136,8 +135,8 @@ for epoch in range(args.epoch):
             p = float(i + (epoch - args.warmup_epochs) * len_dataloader) / ((args.epoch - args.warmup_epochs) * len_dataloader)
             lambda_grl = 2. / (1. + np.exp(-10 * p)) - 1
             
-            domain_preds_s = model.forward_domain(source_features, lambda_grl)
-            domain_preds_t = model.forward_domain(target_features, lambda_grl)
+            domain_preds_s = model.forward_domain([source_features, source_weight_matrix.detach()], lambda_grl)
+            domain_preds_t = model.forward_domain([target_features, target_weight_matrix.detach()], lambda_grl)
 
             domain_preds = torch.cat((domain_preds_s, domain_preds_t), dim=0)
             domain_labels_source = torch.zeros(domain_preds_s.size(0)).long().cuda()
@@ -147,7 +146,6 @@ for epoch in range(args.epoch):
 
             # 4. 总损失 (移除了 Lu_mt)
             loss_all = Lx + Lu + Ld
-            # loss_all = Lx + Lu
 
             running_losses['class'] += Lx.item()
             running_losses['cons'] += Lu.item()
@@ -166,7 +164,7 @@ for epoch in range(args.epoch):
                 ema_param.data.mul_(0.999).add_(0.001, param.data)
 
         with torch.no_grad():
-            logits_for_acc, _ = model.forward_supervised(inputs_x, targets_x)
+            logits_for_acc, _, _ = model.forward_supervised(inputs_x, targets_x)
             _, acc = compute_seq_acc(logits_for_acc, targets_x, MAXLEN)
         running_accuracy += acc
     
@@ -182,7 +180,7 @@ for epoch in range(args.epoch):
     with torch.no_grad():
         for x, y in test_loader:
             if USE_CUDA: x, y = x.cuda(), y.cuda()
-            outputs, _ = model.forward_unsupervised(x)
+            outputs, _, _ = model.forward_unsupervised(x)
             _, acc = compute_seq_acc(outputs, y, MAXLEN)
             test_accuracy += acc
             total += y.size(0)
@@ -192,7 +190,7 @@ for epoch in range(args.epoch):
     with torch.no_grad():
         for x, y in test_loader:
             if USE_CUDA: x, y = x.cuda(), y.cuda()
-            outputs_ema, _ = model_ema.forward_unsupervised(x)
+            outputs_ema, _, _ = model_ema.forward_unsupervised(x)
             _, acc_ema = compute_seq_acc(outputs_ema, y, MAXLEN)
             test_accuracy_ema += acc_ema
             total_ema += y.size(0)
@@ -237,9 +235,7 @@ ax2.set_ylabel("Accuracy")
 ax2.grid(True, linestyle='--', alpha=0.6)
 ax2.set_ylim(0, 1.0)
 
-# path_params = f"Final_Hybrid_{args.dataset}_{args.label.split('.')[0]}_{args.unlabeled_number}_{args.lr}_{args.seed}"
-date = datetime.datetime.now().strftime("%Y%m%d")
-path_params = f"Final_Hybrid_{args.dataset}_{date}_mean"
+path_params = f"Final_Hybrid_{args.dataset}_{args.label.split('.')[0]}_{args.unlabeled_number}_{args.lr}_{args.seed}"
 fig.savefig(f"result/{path_params}.png")
 print(f"Result plot saved to result/{path_params}.png")
 

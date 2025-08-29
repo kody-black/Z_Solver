@@ -121,10 +121,10 @@ class HybirdDecoder(nn.Module):
         key = encoder_outputs  # [batch, 32, 128]
         value = encoder_outputs  # [batch, 32, 128]
 
-        weighted_context = self.attn(query, key, value)  # [batch, max_len-1, 128]
+        weighted_context, weight_matrix = self.attn(query, key, value)  # [batch, max_len-1, 128]
         output = self.tanh(self.wc(torch.cat((query, weighted_context), 2)))  # [batch, max_len-1, 128]
 
-        return output
+        return output, weight_matrix
 
     def forward_step(self, input, last_hidden, encoder_outputs):
         embed_input = self.embedding(input)
@@ -135,9 +135,11 @@ class HybirdDecoder(nn.Module):
         key = encoder_outputs  # [batch, 32, 128]
         value = encoder_outputs  # [batch, 32, 128]
 
-        weighted_context = self.attn(query, key, value).squeeze(1)
+        weighted_context, weight_matrix = self.attn(query, key, value)
+        weighted_context = weighted_context.squeeze(1)
         output = self.tanh(self.wc(torch.cat((output, weighted_context), 1)))
-        return output, hidden
+        return output, hidden, weight_matrix
+
 
 class ResBlk(nn.Module):
     def __init__(self, ch_in, ch_out):
@@ -176,4 +178,4 @@ class DotProductAttentionLayer(nn.Module):
         alpha = F.softmax(logits, dim=-1)
         weighted_context = torch.matmul(alpha, value)  # [len, 32] * [32, 256]=[len, 256]
 
-        return weighted_context
+        return weighted_context, alpha
