@@ -13,28 +13,31 @@ import os
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# --- 导入稳定版模型 ---
 from models_hybrid import Stable_Hybrid_Model
 from datasets import load_datasets_mean_teacher
 from util import compute_seq_acc, Seq2SeqLoss, ConsistentLoss, get_current_consistency_weight
 
-# --- 参数解析器 (使用最终的稳定版参数) ---
-parser = argparse.ArgumentParser(description='PyTorch Captcha Training Using Final Stable Hybrid Model')
-parser.add_argument('--dataset', default='yandex', type=str, help="数据集名称")
+parser = argparse.ArgumentParser(description='PyTorch Captcha Training with Delayed Attention-DANN')
+# --- 数据与模型参数 ---
+parser.add_argument('--dataset', default='weibo', type=str, help="数据集名称")
 parser.add_argument('--label', default="10000.txt", type=str, help='带标签文件名')
 parser.add_argument('--batch-size', default=32, type=int, help='带标签数据(源域)的批次大小')
 parser.add_argument('--secondary-batch-size', default=64, type=int, help='无标签数据(目标域)的批次大小')
 parser.add_argument('--unlabeled-number', default=5000, type=int, help='使用的无标签图片数量')
-parser.add_argument('--threshold', default=0.95, type=float, help='伪标签置信度阈值')
+
+# --- 训练超参数 ---
 parser.add_argument('--epoch', default=400, type=int, help='训练轮数')
-# --- 关键改动: 移除了不再使用的 -t 参数 ---
-parser.add_argument('--weight', default=1.0, type=float, help='一致性损失权重')
 parser.add_argument('--lr', default=1e-3, type=float, help='学习率 (AdamW 的稳定值)')
-parser.add_argument('--seed', default=42, type=int, help='随机种子')
-parser.add_argument('--lambda-d', default=0.1, type=float, help='领域对抗损失的权重')
 parser.add_argument('--clip-grad', default=5.0, type=float, help='梯度裁剪的范数上限')
+parser.add_argument('--seed', default=42, type=int, help='随机种子')
+
+# --- 损失权重与调度参数 ---
 parser.add_argument('--warmup-epochs', default=10, type=int, help='只进行监督学习的热身轮数')
+parser.add_argument('--attn-warmup-epochs', default=50, type=int, help='注意力DANN介入的热身轮数 (在此之前只用全局池化)')
+parser.add_argument('--threshold', default=0.95, type=float, help='伪标签置信度阈值')
+parser.add_argument('--weight', default=1.0, type=float, help='一致性损失权重')
 parser.add_argument('--consistency-rampup', default=50, type=int, help='一致性损失权重斜坡上升的周期')
+parser.add_argument('--lambda-d', default=0.1, type=float, help='领域对抗损失的权重')
 args = parser.parse_args()
 
 # --- 环境设置 ---
@@ -46,7 +49,6 @@ random.seed(SEED)
 torch.backends.cudnn.benchmark = True
 pprint.pprint(args)
 USE_CUDA = torch.cuda.is_available()
-
 if not os.path.exists('result'): os.makedirs('result')
 
 # --- 数据加载 ---
@@ -58,7 +60,6 @@ model = Stable_Hybrid_Model(vocab_size=len(id2token), max_len=MAXLEN, feature_di
 model_ema = Stable_Hybrid_Model(vocab_size=len(id2token), max_len=MAXLEN, feature_dim=128)
 
 class_criterion = Seq2SeqLoss()
-# --- 关键改动: 只保留 ConsistentLoss ---
 consistent_criterion = ConsistentLoss(args.threshold)
 domain_criterion = CrossEntropyLoss()
 
@@ -86,8 +87,7 @@ print(TABLE_SEPARATOR)
 # --- 训练循环 ---
 for epoch in range(args.epoch):
     time_epoch = time.time()
-    model.train()
-    model_ema.train()
+    model.train(); model_ema.train()
 
     running_losses = {'class': 0.0, 'cons': 0.0, 'domain': 0.0}
     running_accuracy = 0.0
@@ -107,52 +107,49 @@ for epoch in range(args.epoch):
             inputs_u_w, inputs_u_s = inputs_u_w.cuda(), inputs_u_s.cuda()
 
         optimizer.zero_grad()
-
-        args.warmup_epochs = 0
-        # --- 热身阶段 ---
+        
+        # 1. 监督损失 (始终计算以获取特征)
+        logits_l, source_features, source_weight_matrix = model.forward_supervised(inputs_x, targets_x)
+        Lx = class_criterion(logits_l, targets_x)
+        
+        # 根据是否在热身期决定损失构成
         if epoch < args.warmup_epochs:
-            logits_l, _ = model.forward_supervised(inputs_x, targets_x)
-            loss_all = class_criterion(logits_l, targets_x)
-            running_losses['class'] += loss_all.item()
+            loss_all = Lx
         else:
-        # --- 正常训练阶段 ---
-            # 1. 监督损失
-            logits_l, source_features, source_weight_matrix = model.forward_supervised(inputs_x, targets_x)
-            Lx = class_criterion(logits_l, targets_x)
-
-            # 2. 一致性损失 (只保留 Lu)
+            # 2. 一致性损失
             with torch.no_grad():
                 logits_u_w_teacher, _, _ = model_ema.forward_unsupervised(inputs_u_w)
-            logits_u_s, _, _ = model.forward_unsupervised(inputs_u_s)
-            _, target_features, target_weight_matrix = model.forward_unsupervised(inputs_u_w)
             
-            # consistency_weight = get_current_consistency_weight(args.weight, args.consistency_rampup, epoch - args.warmup_epochs)
-            # Lu = consistency_weight * consistent_criterion(logits_u_w_teacher.detach(), logits_u_s)
-
-            Lu = 2 * consistent_criterion(logits_u_w_teacher.detach(), logits_u_s)
+            logits_u_s, target_features, target_weight_matrix = model.forward_unsupervised(inputs_u_s)
+            
+            consistency_weight = get_current_consistency_weight(args.weight, args.consistency_rampup, epoch - args.warmup_epochs)
+            Lu = consistency_weight * consistent_criterion(logits_u_w_teacher.detach(), logits_u_s)
 
             # 3. 领域对抗损失
             p = float(i + (epoch - args.warmup_epochs) * len_dataloader) / ((args.epoch - args.warmup_epochs) * len_dataloader)
             lambda_grl = 2. / (1. + np.exp(-10 * p)) - 1
             
-            domain_preds_s = model.forward_domain([source_features, source_weight_matrix.detach()], lambda_grl)
-            domain_preds_t = model.forward_domain([target_features, target_weight_matrix.detach()], lambda_grl)
+            # --- 改动: 注意力延迟介入 ---
+            use_attention_for_dann = epoch >= args.attn_warmup_epochs
 
-            domain_preds = torch.cat((domain_preds_s, domain_preds_t), dim=0)
-            domain_labels_source = torch.zeros(domain_preds_s.size(0)).long().cuda()
-            domain_labels_target = torch.ones(domain_preds_t.size(0)).long().cuda()
-            domain_labels = torch.cat((domain_labels_source, domain_labels_target), dim=0)
-            Ld = domain_criterion(domain_preds, domain_labels)
+            domain_preds_s, domain_preds_t = model.forward_domain(
+                source_features, target_features, 
+                source_weight_matrix.detach(), target_weight_matrix.detach(), 
+                lambda_grl, use_attn=use_attention_for_dann
+            )
 
-            # 4. 总损失 (移除了 Lu_mt)
-            loss_all = Lx + Lu + Ld
+            labels_s = torch.zeros(domain_preds_s.size(0), dtype=torch.long, device=inputs_x.device)
+            labels_t = torch.ones(domain_preds_t.size(0), dtype=torch.long, device=inputs_x.device)
+            
+            Ld = domain_criterion(torch.cat((domain_preds_s, domain_preds_t)), torch.cat((labels_s, labels_t)))
 
-            running_losses['class'] += Lx.item()
+            # 4. 总损失
+            loss_all = Lx + Lu + args.lambda_d * Ld
             running_losses['cons'] += Lu.item()
             running_losses['domain'] += Ld.item()
 
         if torch.isnan(loss_all):
-            print(f"NaN detected in total loss at epoch {epoch}, iteration {i}. Stopping training.")
+            print(f"NaN detected in total loss at epoch {epoch}, iteration {i}. Stopping.")
             exit()
 
         loss_all.backward()
@@ -164,17 +161,17 @@ for epoch in range(args.epoch):
                 ema_param.data.mul_(0.999).add_(0.001, param.data)
 
         with torch.no_grad():
-            logits_for_acc, _, _ = model.forward_supervised(inputs_x, targets_x)
-            _, acc = compute_seq_acc(logits_for_acc, targets_x, MAXLEN)
+            _, acc = compute_seq_acc(logits_l, targets_x, MAXLEN)
         running_accuracy += acc
+        running_losses['class'] += Lx.item()
     
     # --- 保存和打印统计信息 ---
-    total_train_samples = len(source_loader.sampler.data_source) if hasattr(source_loader.sampler, 'data_source') else len(source_loader.dataset)
     history['train_loss_class'].append(running_losses['class'] / len_dataloader)
     history['train_loss_consistency'].append(running_losses['cons'] / len_dataloader)
     history['train_loss_domain'].append(running_losses['domain'] / len_dataloader)
-    history['train_accuracy'].append(running_accuracy / total_train_samples)
+    history['train_accuracy'].append(running_accuracy / (len_dataloader * args.batch_size))
 
+    # --- 评估 ---
     model.eval(); model_ema.eval()
     test_accuracy, total = 0, 0
     with torch.no_grad():
@@ -184,7 +181,7 @@ for epoch in range(args.epoch):
             _, acc = compute_seq_acc(outputs, y, MAXLEN)
             test_accuracy += acc
             total += y.size(0)
-    history['test_accuracy'].append(test_accuracy / total)
+    history['test_accuracy'].append(test_accuracy / total if total > 0 else 0)
 
     test_accuracy_ema, total_ema = 0, 0
     with torch.no_grad():
@@ -194,7 +191,7 @@ for epoch in range(args.epoch):
             _, acc_ema = compute_seq_acc(outputs_ema, y, MAXLEN)
             test_accuracy_ema += acc_ema
             total_ema += y.size(0)
-    current_ema_acc = test_accuracy_ema / total_ema
+    current_ema_acc = test_accuracy_ema / total_ema if total_ema > 0 else 0
     history['test_accuracy_ema'].append(current_ema_acc)
 
     epoch_time = time.time() - time_epoch
@@ -206,12 +203,10 @@ for epoch in range(args.epoch):
         
 print(TABLE_SEPARATOR)
 print(f"Training finished. Best EMA model accuracy: {best_ema_acc:.4f}")
-print(f"Best model saved to result/best_model_ema.pth")
 
-# --- 训练结束，绘制结果图 ---
+# --- 绘图 ---
 fig = plt.figure(figsize=(20, 8))
-fig.suptitle(f'Training History for {args.dataset}')
-
+fig.suptitle(f'Training History for {args.dataset} - Delayed Attention DANN')
 ax1 = fig.add_subplot(121)
 ax1.set_title("Loss Curves")
 ax1.plot(history['train_loss_class'], label='L_Class (Train)')
@@ -222,22 +217,17 @@ ax1.set_xlabel("Epochs")
 ax1.set_ylabel("Loss")
 ax1.grid(True, linestyle='--', alpha=0.6)
 ax1.set_ylim(bottom=0)
-
 ax2 = fig.add_subplot(122)
 ax2.set_title("Accuracy Curves")
 ax2.plot(history['train_accuracy'], label='Train Accuracy')
 ax2.plot(history['test_accuracy'], label='Test Acc (Student)')
 ax2.plot(history['test_accuracy_ema'], label='Test Acc (EMA/Teacher)')
 ax2.axhline(y=best_ema_acc, color='g', linestyle='--', label=f'Best EMA Acc: {best_ema_acc:.4f}')
+ax2.axvline(x=args.attn_warmup_epochs, color='r', linestyle=':', label=f'Attn DANN Start (Epoch {args.attn_warmup_epochs})')
 ax2.legend()
 ax2.set_xlabel("Epochs")
 ax2.set_ylabel("Accuracy")
 ax2.grid(True, linestyle='--', alpha=0.6)
 ax2.set_ylim(0, 1.0)
-
-path_params = f"Final_Hybrid_{args.dataset}_{args.label.split('.')[0]}_{args.unlabeled_number}_{args.lr}_{args.seed}"
+path_params = f"DelayedAttnDANN_{args.dataset}_{args.label.split('.')[0]}_{args.attn_warmup_epochs}"
 fig.savefig(f"result/{path_params}.png")
-print(f"Result plot saved to result/{path_params}.png")
-
-np.save(f"result/{path_params}_history.npy", history)
-print(f"Training history saved to result/{path_params}_history.npy")
