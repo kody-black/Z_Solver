@@ -8,6 +8,7 @@ import pprint
 import numpy as np
 import random
 import time
+import datetime
 import os
 
 matplotlib.use('Agg')
@@ -16,7 +17,7 @@ import matplotlib.pyplot as plt
 # --- 导入稳定版模型 ---
 from models_hybrid import Stable_Hybrid_Model
 from datasets import load_datasets_mean_teacher
-from util import compute_seq_acc, Seq2SeqLoss, ConsistentLoss, get_current_consistency_weight
+from util import compute_seq_acc, Seq2SeqLoss, ConsistentLoss, get_current_consistency_weight, setup_gpu
 
 # --- 参数解析器 (使用最终的稳定版参数) ---
 parser = argparse.ArgumentParser(description='PyTorch Captcha Training Using Final Stable Hybrid Model')
@@ -27,7 +28,6 @@ parser.add_argument('--secondary-batch-size', default=64, type=int, help='无标
 parser.add_argument('--unlabeled-number', default=5000, type=int, help='使用的无标签图片数量')
 parser.add_argument('--threshold', default=0.95, type=float, help='伪标签置信度阈值')
 parser.add_argument('--epoch', default=400, type=int, help='训练轮数')
-# --- 关键改动: 移除了不再使用的 -t 参数 ---
 parser.add_argument('--weight', default=1.0, type=float, help='一致性损失权重')
 parser.add_argument('--lr', default=1e-3, type=float, help='学习率 (AdamW 的稳定值)')
 parser.add_argument('--seed', default=42, type=int, help='随机种子')
@@ -35,6 +35,9 @@ parser.add_argument('--lambda-d', default=0.1, type=float, help='领域对抗损
 parser.add_argument('--clip-grad', default=5.0, type=float, help='梯度裁剪的范数上限')
 parser.add_argument('--warmup-epochs', default=10, type=int, help='只进行监督学习的热身轮数')
 parser.add_argument('--consistency-rampup', default=50, type=int, help='一致性损失权重斜坡上升的周期')
+parser.add_argument('--gpu-id', default=None, type=int, help='指定GPU ID，如果为None则自动选择最空闲的GPU')
+parser.add_argument('--min-memory', default=1000, type=int, help='最小可用内存要求（MB）')
+parser.add_argument('--max-utilization', default=50, type=int, help='最大GPU利用率阈值（%）')
 args = parser.parse_args()
 
 # --- 环境设置 ---
@@ -45,7 +48,10 @@ np.random.seed(SEED)
 random.seed(SEED)
 torch.backends.cudnn.benchmark = True
 pprint.pprint(args)
-USE_CUDA = torch.cuda.is_available()
+
+# --- GPU设备设置 ---
+device = setup_gpu(device_id=args.gpu_id, min_memory_mb=args.min_memory, max_utilization=args.max_utilization)
+USE_CUDA = device.type == 'cuda'
 
 if not os.path.exists('result'): os.makedirs('result')
 
@@ -63,8 +69,8 @@ consistent_criterion = ConsistentLoss(args.threshold)
 domain_criterion = CrossEntropyLoss()
 
 if USE_CUDA:
-    model, model_ema = model.cuda(), model_ema.cuda()
-    class_criterion, consistent_criterion, domain_criterion = class_criterion.cuda(), consistent_criterion.cuda(), domain_criterion.cuda()
+    model, model_ema = model.to(device), model_ema.to(device)
+    class_criterion, consistent_criterion, domain_criterion = class_criterion.to(device), consistent_criterion.to(device), domain_criterion.to(device)
 
 for param_main, param_ema in zip(model.parameters(), model_ema.parameters()):
     param_ema.data.copy_(param_main.data)
@@ -103,8 +109,8 @@ for epoch in range(args.epoch):
             inputs_x, targets_x = next(source_iter)
 
         if USE_CUDA:
-            inputs_x, targets_x = inputs_x.cuda(), targets_x.cuda()
-            inputs_u_w, inputs_u_s = inputs_u_w.cuda(), inputs_u_s.cuda()
+            inputs_x, targets_x = inputs_x.to(device), targets_x.to(device)
+            inputs_u_w, inputs_u_s = inputs_u_w.to(device), inputs_u_s.to(device)
 
         optimizer.zero_grad()
         
@@ -138,12 +144,12 @@ for epoch in range(args.epoch):
             domain_preds_t = model.forward_domain(target_features, lambda_grl)
 
             domain_preds = torch.cat((domain_preds_s, domain_preds_t), dim=0)
-            domain_labels_source = torch.zeros(inputs_x.size(0)).long().cuda()
-            domain_labels_target = torch.ones(inputs_u_w.size(0)).long().cuda()
+            domain_labels_source = torch.zeros(inputs_x.size(0)).long().to(device)
+            domain_labels_target = torch.ones(inputs_u_w.size(0)).long().to(device)
             domain_labels = torch.cat((domain_labels_source, domain_labels_target), dim=0)
             Ld = domain_criterion(domain_preds, domain_labels)
 
-            # 4. 总损失 (移除了 Lu_mt)
+            # 4. 总损失
             loss_all = Lx + Lu + args.lambda_d * Ld
 
             running_losses['class'] += Lx.item()
@@ -178,7 +184,7 @@ for epoch in range(args.epoch):
     test_accuracy, total = 0, 0
     with torch.no_grad():
         for x, y in test_loader:
-            if USE_CUDA: x, y = x.cuda(), y.cuda()
+            if USE_CUDA: x, y = x.to(device), y.to(device)
             outputs = model.forward_unsupervised(x)
             _, acc = compute_seq_acc(outputs, y, MAXLEN)
             test_accuracy += acc
@@ -188,7 +194,7 @@ for epoch in range(args.epoch):
     test_accuracy_ema, total_ema = 0, 0
     with torch.no_grad():
         for x, y in test_loader:
-            if USE_CUDA: x, y = x.cuda(), y.cuda()
+            if USE_CUDA: x, y = x.to(device), y.to(device)
             outputs_ema = model_ema.forward_unsupervised(x)
             _, acc_ema = compute_seq_acc(outputs_ema, y, MAXLEN)
             test_accuracy_ema += acc_ema
@@ -234,7 +240,9 @@ ax2.set_ylabel("Accuracy")
 ax2.grid(True, linestyle='--', alpha=0.6)
 ax2.set_ylim(0, 1.0)
 
-path_params = f"Final_Hybrid_{args.dataset}_{args.label.split('.')[0]}_{args.unlabeled_number}_{args.lr}_{args.seed}"
+# path_params = f"Final_Hybrid_{args.dataset}_{args.label.split('.')[0]}_{args.unlabeled_number}_{args.lr}_{args.seed}"
+date = datetime.datetime.now().strftime("%Y%m%d")
+path_params = f"Hybrid_{args.dataset}_{date}"
 fig.savefig(f"result/{path_params}.png")
 print(f"Result plot saved to result/{path_params}.png")
 

@@ -3,7 +3,7 @@ import torch
 from torch.autograd import Function, Variable
 from layers import CNN, Encoder, HybirdDecoder
 
-USE_CUDA = torch.cuda.is_available()
+# 移除全局USE_CUDA，改为使用设备参数
 
 # =========================================================================================
 # 1. GRL (Gradient Reversal Layer) - DANN的核心
@@ -92,8 +92,9 @@ class Stable_Hybrid_Model(nn.Module):
         
         outputs = []
         batch_size = x.size(0)
-        input_char = torch.zeros([batch_size]).long().cuda() if USE_CUDA else torch.zeros([batch_size]).long()
-        last_hidden = Variable(torch.zeros(self.decoder.num_rnn_layers, batch_size, self.decoder.hidden_size)).cuda() if USE_CUDA else Variable(torch.zeros(self.decoder.num_rnn_layers, batch_size, self.decoder.hidden_size))
+        device = x.device  # 使用输入tensor的设备
+        input_char = torch.zeros([batch_size]).long().to(device)
+        last_hidden = Variable(torch.zeros(self.decoder.num_rnn_layers, batch_size, self.decoder.hidden_size)).to(device)
 
         for i in range(self.max_len - 1):
             output, last_hidden = self.decoder.forward_step(input_char, last_hidden, encoder_outputs)

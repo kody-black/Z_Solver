@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch.nn import Parameter
 import math
 
-USE_CUDA = torch.cuda.is_available()
+# 移除全局USE_CUDA，改为使用设备参数
 
 
 class CNN(nn.Module):
@@ -84,9 +84,8 @@ class Encoder(nn.Module):
 
     def forward(self, x):
         batch_size = x.size(0)
-        h0 = Variable(torch.zeros(self.num_rnn_layers, batch_size, self.rnn_hidden_size))
-        if USE_CUDA:
-            h0 = h0.cuda()
+        device = x.device  # 使用输入tensor的设备
+        h0 = Variable(torch.zeros(self.num_rnn_layers, batch_size, self.rnn_hidden_size)).to(device)
         out, hidden = self.gru(x, h0)
 
         return out
@@ -111,9 +110,8 @@ class HybirdDecoder(nn.Module):
 
     def forward_train(self, encoder_outputs, max_len, y):
         batch_size = encoder_outputs.size(0)
-        last_hidden = Variable(torch.zeros(self.num_rnn_layers, batch_size, self.hidden_size))
-        if USE_CUDA:
-            last_hidden = last_hidden.cuda()
+        device = encoder_outputs.device  # 使用输入tensor的设备
+        last_hidden = Variable(torch.zeros(self.num_rnn_layers, batch_size, self.hidden_size)).to(device)
 
         input = y[:, :max_len - 1]  # [batch, max_len-1]
         embed_input = self.embedding(input)  # [batch, max_len-1, 128]
