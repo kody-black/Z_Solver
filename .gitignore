@@ -17,12 +17,12 @@ sdist/
 var/
 wheels/
 pip-wheel-metadata/
-share/python-wheels/
+share/
 *.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
-
+  
 # 虚拟环境
 bin/
 include/

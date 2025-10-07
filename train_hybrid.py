@@ -241,7 +241,7 @@ ax2.grid(True, linestyle='--', alpha=0.6)
 ax2.set_ylim(0, 1.0)
 
 # path_params = f"Final_Hybrid_{args.dataset}_{args.label.split('.')[0]}_{args.unlabeled_number}_{args.lr}_{args.seed}"
-date = datetime.datetime.now().strftime("%Y%m%d")
+date = datetime.datetime.now().strftime("%Y%m%d%H%M")
 path_params = f"Hybrid_{args.dataset}_{date}"
 fig.savefig(f"result/{path_params}.png")
 print(f"Result plot saved to result/{path_params}.png")
