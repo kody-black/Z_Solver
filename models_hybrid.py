@@ -81,7 +81,7 @@ class Stable_Hybrid_Model(nn.Module):
         encoder_outputs = self.extract_features(x)
         decoder_out = self.decoder.forward_train(encoder_outputs, self.max_len, y)
         logits = self.prediction(decoder_out)
-        return logits, decoder_out
+        return logits
 
     def forward_unsupervised(self, x):
         """
@@ -95,18 +95,16 @@ class Stable_Hybrid_Model(nn.Module):
         input_char = torch.zeros([batch_size]).long().cuda() if USE_CUDA else torch.zeros([batch_size]).long()
         last_hidden = Variable(torch.zeros(self.decoder.num_rnn_layers, batch_size, self.decoder.hidden_size)).cuda() if USE_CUDA else Variable(torch.zeros(self.decoder.num_rnn_layers, batch_size, self.decoder.hidden_size))
 
-        features = []
         for i in range(self.max_len - 1):
-            feature, last_hidden = self.decoder.forward_step(input_char, last_hidden, encoder_outputs)
-            output = self.prediction(feature)
+            output, last_hidden = self.decoder.forward_step(input_char, last_hidden, encoder_outputs)
+            output = self.prediction(output)
             input_char = output.max(1)[1]
-            features.append(feature.unsqueeze(1))
             outputs.append(output.unsqueeze(1))
         
-        return torch.cat(outputs, dim=1), torch.cat(features, dim=1)
+        return torch.cat(outputs, dim=1)
 
     def forward_domain(self, features, lambda_):
-        """  
+        """
         路径3: 领域判别路径 (用于计算 L_Domain)
         接收提取好的特征，返回领域预测。
         """

@@ -1,5 +1,4 @@
 import argparse
-import datetime
 import torch
 from torch import optim
 from torch.nn import CrossEntropyLoss
@@ -21,7 +20,7 @@ from util import compute_seq_acc, Seq2SeqLoss, ConsistentLoss, get_current_consi
 
 # --- 参数解析器 (使用最终的稳定版参数) ---
 parser = argparse.ArgumentParser(description='PyTorch Captcha Training Using Final Stable Hybrid Model')
-parser.add_argument('--dataset', default='yandex', type=str, help="数据集名称")
+parser.add_argument('--dataset', default='weibo', type=str, help="数据集名称")
 parser.add_argument('--label', default="10000.txt", type=str, help='带标签文件名')
 parser.add_argument('--batch-size', default=32, type=int, help='带标签数据(源域)的批次大小')
 parser.add_argument('--secondary-batch-size', default=64, type=int, help='无标签数据(目标域)的批次大小')
@@ -108,46 +107,44 @@ for epoch in range(args.epoch):
             inputs_u_w, inputs_u_s = inputs_u_w.cuda(), inputs_u_s.cuda()
 
         optimizer.zero_grad()
-
-        args.warmup_epochs = 0
+        
         # --- 热身阶段 ---
         if epoch < args.warmup_epochs:
-            logits_l, _ = model.forward_supervised(inputs_x, targets_x)
+            logits_l = model.forward_supervised(inputs_x, targets_x)
             loss_all = class_criterion(logits_l, targets_x)
             running_losses['class'] += loss_all.item()
         else:
         # --- 正常训练阶段 ---
             # 1. 监督损失
-            logits_l, source_features = model.forward_supervised(inputs_x, targets_x)
+            logits_l = model.forward_supervised(inputs_x, targets_x)
             Lx = class_criterion(logits_l, targets_x)
 
             # 2. 一致性损失 (只保留 Lu)
             with torch.no_grad():
-                logits_u_w_teacher, _ = model_ema.forward_unsupervised(inputs_u_w)
-            logits_u_s, _ = model.forward_unsupervised(inputs_u_s)
-            _, target_features = model.forward_unsupervised(inputs_u_w)
+                logits_u_w_teacher = model_ema.forward_unsupervised(inputs_u_w)
+            logits_u_s = model.forward_unsupervised(inputs_u_s)
             
-            # consistency_weight = get_current_consistency_weight(args.weight, args.consistency_rampup, epoch - args.warmup_epochs)
-            # Lu = consistency_weight * consistent_criterion(logits_u_w_teacher.detach(), logits_u_s)
-
-            Lu = 2 * consistent_criterion(logits_u_w_teacher.detach(), logits_u_s)
+            consistency_weight = get_current_consistency_weight(args.weight, args.consistency_rampup, epoch - args.warmup_epochs)
+            Lu = consistency_weight * consistent_criterion(logits_u_w_teacher.detach(), logits_u_s)
 
             # 3. 领域对抗损失
             p = float(i + (epoch - args.warmup_epochs) * len_dataloader) / ((args.epoch - args.warmup_epochs) * len_dataloader)
             lambda_grl = 2. / (1. + np.exp(-10 * p)) - 1
             
+            source_features = model.extract_features(inputs_x)
+            target_features = model.extract_features(inputs_u_w)
+            
             domain_preds_s = model.forward_domain(source_features, lambda_grl)
             domain_preds_t = model.forward_domain(target_features, lambda_grl)
 
             domain_preds = torch.cat((domain_preds_s, domain_preds_t), dim=0)
-            domain_labels_source = torch.zeros(domain_preds_s.size(0)).long().cuda()
-            domain_labels_target = torch.ones(domain_preds_t.size(0)).long().cuda()
+            domain_labels_source = torch.zeros(inputs_x.size(0)).long().cuda()
+            domain_labels_target = torch.ones(inputs_u_w.size(0)).long().cuda()
             domain_labels = torch.cat((domain_labels_source, domain_labels_target), dim=0)
             Ld = domain_criterion(domain_preds, domain_labels)
 
             # 4. 总损失 (移除了 Lu_mt)
-            loss_all = Lx + Lu + Ld
-            # loss_all = Lx + Lu
+            loss_all = Lx + Lu + args.lambda_d * Ld
 
             running_losses['class'] += Lx.item()
             running_losses['cons'] += Lu.item()
@@ -166,7 +163,7 @@ for epoch in range(args.epoch):
                 ema_param.data.mul_(0.999).add_(0.001, param.data)
 
         with torch.no_grad():
-            logits_for_acc, _ = model.forward_supervised(inputs_x, targets_x)
+            logits_for_acc = model.forward_supervised(inputs_x, targets_x)
             _, acc = compute_seq_acc(logits_for_acc, targets_x, MAXLEN)
         running_accuracy += acc
     
@@ -182,7 +179,7 @@ for epoch in range(args.epoch):
     with torch.no_grad():
         for x, y in test_loader:
             if USE_CUDA: x, y = x.cuda(), y.cuda()
-            outputs, _ = model.forward_unsupervised(x)
+            outputs = model.forward_unsupervised(x)
             _, acc = compute_seq_acc(outputs, y, MAXLEN)
             test_accuracy += acc
             total += y.size(0)
@@ -192,7 +189,7 @@ for epoch in range(args.epoch):
     with torch.no_grad():
         for x, y in test_loader:
             if USE_CUDA: x, y = x.cuda(), y.cuda()
-            outputs_ema, _ = model_ema.forward_unsupervised(x)
+            outputs_ema = model_ema.forward_unsupervised(x)
             _, acc_ema = compute_seq_acc(outputs_ema, y, MAXLEN)
             test_accuracy_ema += acc_ema
             total_ema += y.size(0)
@@ -237,9 +234,7 @@ ax2.set_ylabel("Accuracy")
 ax2.grid(True, linestyle='--', alpha=0.6)
 ax2.set_ylim(0, 1.0)
 
-# path_params = f"Final_Hybrid_{args.dataset}_{args.label.split('.')[0]}_{args.unlabeled_number}_{args.lr}_{args.seed}"
-date = datetime.datetime.now().strftime("%Y%m%d")
-path_params = f"Final_Hybrid_{args.dataset}_{date}_mean"
+path_params = f"Final_Hybrid_{args.dataset}_{args.label.split('.')[0]}_{args.unlabeled_number}_{args.lr}_{args.seed}"
 fig.savefig(f"result/{path_params}.png")
 print(f"Result plot saved to result/{path_params}.png")
 
