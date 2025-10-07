@@ -86,34 +86,14 @@ class Stable_Hybrid_Model(nn.Module):
         
         return torch.cat(outputs, dim=1), encoder_outputs, torch.cat(weight_matrices, dim=1)
 
-    def forward_domain(self, source_features, target_features, source_weights, target_weights, lambda_, use_attn=False):
+    def forward_domain(self, features, lambda_):
         """
-        路径3: 领域判别路径
-        - use_attn: bool, 控制是否使用注意力加权特征
+        路径3: 领域判别路径 (用于计算 L_Domain)
+        接收提取好的特征，返回领域预测。
         """
-        # 1. 全局池化特征 (始终使用)
-        source_pooled = torch.mean(source_features, dim=1)
-        target_pooled = torch.mean(target_features, dim=1)
-        
-        # 2. 根据 use_attn 标志决定是否使用注意力加权特征
-        if use_attn:
-            source_weighted = torch.bmm(source_weights, source_features)
-            source_attn = source_weighted.view(-1, source_weighted.shape[-1])
-            
-            target_weighted = torch.bmm(target_weights, target_features)
-            target_attn = target_weighted.view(-1, target_weighted.shape[-1])
-
-            combined_source = torch.cat([source_pooled, source_attn], dim=0)
-            combined_target = torch.cat([target_pooled, target_attn], dim=0)
-        else:
-            combined_source = source_pooled
-            combined_target = target_pooled
-
-        # 3. 应用 GRL 并进行判别
-        reversed_source = self.grl_func(combined_source, lambda_)
-        reversed_target = self.grl_func(combined_target, lambda_)
-
-        preds_s = self.domain_discriminator(reversed_source)
-        preds_t = self.domain_discriminator(reversed_target)
-        
-        return preds_s, preds_t
+        # 将序列特征平均池化
+        pooled_features = torch.mean(features, dim=1)
+        # 应用 GRL
+        reversed_features = self.grl_func(pooled_features, lambda_)
+        domain_predictions = self.domain_discriminator(reversed_features)
+        return domain_predictions

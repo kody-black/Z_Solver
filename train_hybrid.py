@@ -33,7 +33,6 @@ parser.add_argument('--seed', default=42, type=int, help='随机种子')
 
 # --- 损失权重与调度参数 ---
 parser.add_argument('--warmup-epochs', default=10, type=int, help='只进行监督学习的热身轮数')
-parser.add_argument('--attn-warmup-epochs', default=50, type=int, help='注意力DANN介入的热身轮数 (在此之前只用全局池化)')
 parser.add_argument('--threshold', default=0.95, type=float, help='伪标签置信度阈值')
 parser.add_argument('--weight', default=1.0, type=float, help='一致性损失权重')
 parser.add_argument('--consistency-rampup', default=50, type=int, help='一致性损失权重斜坡上升的周期')
@@ -129,14 +128,8 @@ for epoch in range(args.epoch):
             p = float(i + (epoch - args.warmup_epochs) * len_dataloader) / ((args.epoch - args.warmup_epochs) * len_dataloader)
             lambda_grl = 2. / (1. + np.exp(-10 * p)) - 1
             
-            # --- 改动: 注意力延迟介入 ---
-            use_attention_for_dann = epoch >= args.attn_warmup_epochs
-
-            domain_preds_s, domain_preds_t = model.forward_domain(
-                source_features, target_features, 
-                source_weight_matrix.detach(), target_weight_matrix.detach(), 
-                lambda_grl, use_attn=use_attention_for_dann
-            )
+            domain_preds_s = model.forward_domain(source_features, lambda_grl)
+            domain_preds_t = model.forward_domain(target_features, lambda_grl)
 
             labels_s = torch.zeros(domain_preds_s.size(0), dtype=torch.long, device=inputs_x.device)
             labels_t = torch.ones(domain_preds_t.size(0), dtype=torch.long, device=inputs_x.device)
@@ -206,7 +199,7 @@ print(f"Training finished. Best EMA model accuracy: {best_ema_acc:.4f}")
 
 # --- 绘图 ---
 fig = plt.figure(figsize=(20, 8))
-fig.suptitle(f'Training History for {args.dataset} - Delayed Attention DANN')
+fig.suptitle(f'Training History for {args.dataset} - Simplified DANN')
 ax1 = fig.add_subplot(121)
 ax1.set_title("Loss Curves")
 ax1.plot(history['train_loss_class'], label='L_Class (Train)')
@@ -223,11 +216,11 @@ ax2.plot(history['train_accuracy'], label='Train Accuracy')
 ax2.plot(history['test_accuracy'], label='Test Acc (Student)')
 ax2.plot(history['test_accuracy_ema'], label='Test Acc (EMA/Teacher)')
 ax2.axhline(y=best_ema_acc, color='g', linestyle='--', label=f'Best EMA Acc: {best_ema_acc:.4f}')
-ax2.axvline(x=args.attn_warmup_epochs, color='r', linestyle=':', label=f'Attn DANN Start (Epoch {args.attn_warmup_epochs})')
+ax2.axvline(x=args.warmup_epochs, color='r', linestyle=':', label=f'DANN Start (Epoch {args.warmup_epochs})')
 ax2.legend()
 ax2.set_xlabel("Epochs")
 ax2.set_ylabel("Accuracy")
 ax2.grid(True, linestyle='--', alpha=0.6)
 ax2.set_ylim(0, 1.0)
-path_params = f"DelayedAttnDANN_{args.dataset}_{args.label.split('.')[0]}_{args.attn_warmup_epochs}"
+path_params = f"SimplifiedDANN_{args.dataset}_{args.label.split('.')[0]}"
 fig.savefig(f"result/{path_params}.png")

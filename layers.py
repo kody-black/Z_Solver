@@ -99,12 +99,11 @@ class HybirdDecoder(nn.Module):
         self.vocab_size = vocab_size
         self.num_rnn_layers = num_rnn_layers
 
-        self.attn = DotProductAttentionLayer()
         self.gru = nn.GRU(hidden_size, hidden_size,
                           num_rnn_layers, batch_first=True,
                           dropout=dropout)
 
-        self.wc = nn.Linear(2 * hidden_size, hidden_size)
+        self.wc = nn.Linear(hidden_size, hidden_size)
 
         self.tanh = nn.Tanh()
         self.embedding = nn.Embedding(vocab_size, hidden_size)
@@ -117,28 +116,22 @@ class HybirdDecoder(nn.Module):
 
         input = y[:, :max_len - 1]  # [batch, max_len-1]
         embed_input = self.embedding(input)  # [batch, max_len-1, 128]
-        query, _ = self.gru(embed_input, last_hidden)  # [batch, max_len-1, 128]
-        key = encoder_outputs  # [batch, 32, 128]
-        value = encoder_outputs  # [batch, 32, 128]
+        output, _ = self.gru(embed_input, last_hidden)  # [batch, max_len-1, 128]
+        output = self.tanh(self.wc(output))  # [batch, max_len-1, 128]
 
-        weighted_context, weight_matrix = self.attn(query, key, value)  # [batch, max_len-1, 128]
-        output = self.tanh(self.wc(torch.cat((query, weighted_context), 2)))  # [batch, max_len-1, 128]
-
-        return output, weight_matrix
+        # 返回一个虚拟的权重矩阵以保持接口兼容性
+        dummy_weight_matrix = torch.zeros(batch_size, max_len-1, encoder_outputs.size(1), device=encoder_outputs.device)
+        return output, dummy_weight_matrix
 
     def forward_step(self, input, last_hidden, encoder_outputs):
         embed_input = self.embedding(input)
         output, hidden = self.gru(embed_input.unsqueeze(1), last_hidden)
         output = output.squeeze(1)
-
-        query = output.unsqueeze(1)  # [batch, 1, 128]
-        key = encoder_outputs  # [batch, 32, 128]
-        value = encoder_outputs  # [batch, 32, 128]
-
-        weighted_context, weight_matrix = self.attn(query, key, value)
-        weighted_context = weighted_context.squeeze(1)
-        output = self.tanh(self.wc(torch.cat((output, weighted_context), 1)))
-        return output, hidden, weight_matrix
+        output = self.tanh(self.wc(output))
+        
+        # 返回一个虚拟的权重矩阵以保持接口兼容性
+        dummy_weight_matrix = torch.zeros(output.size(0), 1, encoder_outputs.size(1), device=encoder_outputs.device)
+        return output, hidden, dummy_weight_matrix
 
 
 class ResBlk(nn.Module):
@@ -168,14 +161,3 @@ class ResBlk(nn.Module):
         return out
 
 
-class DotProductAttentionLayer(nn.Module):
-    def __init__(self):
-        super(DotProductAttentionLayer, self).__init__()
-
-    def forward(self, query, key, value):
-        logits = torch.matmul(query, key.permute(0, 2, 1))  # [len, 256]*[256, 32]=[len, 32]
-
-        alpha = F.softmax(logits, dim=-1)
-        weighted_context = torch.matmul(alpha, value)  # [len, 32] * [32, 256]=[len, 256]
-
-        return weighted_context, alpha
